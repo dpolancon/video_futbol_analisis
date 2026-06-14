@@ -1,0 +1,44 @@
+# ==========================================
+# DRONE SOCCER ANALYTICS REPOSITORY GITIGNORE
+# ==========================================
+
+# Data & Output Isolation
+inputs/
+outputs/
+data/
+models/
+weights/
+
+# Video, Audio & Media Binaries
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.mp3
+*.wav
+*.aac
+*.flac
+
+# ML/DL Framework Artifacts & Checkpoints
+*.pt
+*.pth
+*.onnx
+*.engine
+*.pkl
+*.pickle
+*.h5
+
+# OS & Environment Files
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+
+# IDE Profiles
+.vscode/
+.idea/

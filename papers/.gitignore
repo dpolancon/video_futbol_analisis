@@ -1,0 +1,5 @@
+# Ignore all heavy PDF research papers in this folder
+*
+
+# Except this .gitignore file
+!.gitignore
