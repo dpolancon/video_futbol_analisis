@@ -4,11 +4,12 @@ core/detector.py
 
 This module contains the baseline class wrapper for drone-based object detection
 specifically tuned for high-altitude soccer match footage, referencing the architectures
-and heuristics of Guo et al. (2026).
+and heuristics of Guo et al. (2026). It supports real YOLOv8 inference with an OpenCV
+fallback mode.
 """
 
 import logging
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Any
 import numpy as np
 
 # Configure logging
@@ -38,19 +39,31 @@ class DroneDetector:
                                  Defaults to 'yolov8-p2s3a.pt'.
         """
         self.model_weights = model_weights
-        logger.info(f"Initializing DroneDetector with weights: {self.model_weights}")
+        self.model = None
+        self.has_logged_fallback = False
         
         # Hyperparameters for team clustering (Guo et al. 2026)
         self.dbscan_eps = 0.15
         self.dbscan_min_samples = 3
 
+        logger.info(f"Initializing DroneDetector with weights: {self.model_weights}")
+        
+        # Try to load real YOLO model using Ultralytics
+        try:
+            from ultralytics import YOLO
+            self.model = YOLO(self.model_weights)
+            logger.info("YOLOv8 model loaded successfully.")
+        except ImportError:
+            logger.warning("Ultralytics library not installed. Running in graceful offline fallback mode.")
+        except Exception as e:
+            logger.warning(f"Could not load model weights '{self.model_weights}' ({e}). Running in fallback mode.")
+
     def process_frame(self, frame: np.ndarray) -> Dict[str, Union[List[List[float]], List[str], List[float], List[int]]]:
         """
         Processes a single video frame to detect soccer balls, players, and referees.
 
-        In production, this feeds the frame through the YOLOv8-P2S3A model.
-        In this offline skeleton, it returns structured mock data that represents a standard
-        soccer scene layout with players from two teams and a ball.
+        If Ultralytics and weights are loaded, it runs real inference.
+        Otherwise, it falls back to generating realistic mock detections based on frame size.
 
         Args:
             frame (np.ndarray): Input image frame in BGR format (height, width, channels).
@@ -64,7 +77,72 @@ class DroneDetector:
         """
         height, width = frame.shape[:2]
         
-        # Standard dictionary shape: dummy/placeholder detections representing a typical frame
+        if self.model is not None:
+            return self._process_real_inference(frame)
+        else:
+            if not self.has_logged_fallback:
+                logger.info("No active YOLO model. Generating simulated detections for frame processing.")
+                self.has_logged_fallback = True
+            return self._process_simulated_inference(frame, width, height)
+
+    def _process_real_inference(self, frame: np.ndarray) -> Dict[str, Any]:
+        """
+        Runs real YOLO model inference on the frame.
+        """
+        # Run inference
+        results = self.model(frame, verbose=False)[0]
+        
+        boxes = []
+        labels = []
+        confidences = []
+        player_hues = []
+        
+        # YOLOv8 class map (COCO usually, or custom trained)
+        # Class names: 0 = person/player, 32 = sports ball, etc.
+        # For custom soccer models: 0 = ball, 1 = player, 2 = referee
+        names = self.model.names
+        
+        for box_obj in results.boxes:
+            coords = box_obj.xyxy[0].tolist()  # [xmin, ymin, xmax, ymax]
+            conf = float(box_obj.conf[0])
+            cls_id = int(box_obj.cls[0])
+            label_name = names.get(cls_id, f"class_{cls_id}")
+            
+            # Map typical COCO classes to our expected labels
+            if label_name in ["person", "player"]:
+                mapped_label = "player"
+            elif label_name in ["sports ball", "ball"]:
+                mapped_label = "ball"
+            elif label_name in ["referee", "traffic cone"]:  # fallback map
+                mapped_label = "referee"
+            else:
+                continue  # Skip unrelated detections
+                
+            boxes.append(coords)
+            labels.append(mapped_label)
+            confidences.append(conf)
+            
+            # Extract color hue feature if player
+            if mapped_label == "player":
+                hue = self._extract_player_hue(frame, coords)
+                player_hues.append([hue])
+            else:
+                player_hues.append(None)
+                
+        # Perform DBSCAN clustering on player hues
+        teams = self.cluster_teams_dbscan(labels, player_hues)
+        
+        return {
+            "boxes": boxes,
+            "labels": labels,
+            "confidences": confidences,
+            "teams": teams
+        }
+
+    def _process_simulated_inference(self, frame: np.ndarray, width: int, height: int) -> Dict[str, Any]:
+        """
+        Generates simulated detections representing a soccer match frame.
+        """
         # We simulate 10 players (5 for Team A, 5 for Team B), 1 referee, and 1 ball.
         mock_boxes = [
             # Team A players (simulated around left-to-middle pitch)
@@ -98,23 +176,16 @@ class DroneDetector:
         ]
 
         # Extract features for team clustering
-        # In a real environment, we crop each bounding box, convert to HSV, extract the Hue
-        # channel, normalize it, and cluster players via DBSCAN.
         player_hues = []
         for i, (box, label) in enumerate(zip(mock_boxes, mock_labels)):
             if label == "player":
-                # Simulate mean hue values representing different team jersey colors
-                # Team A: Red shirts (simulated hue value ~ 0.05)
-                # Team B: Blue shirts (simulated hue value ~ 0.65)
-                if i < 5:
-                    simulated_hue = np.random.normal(0.05, 0.02)
-                else:
-                    simulated_hue = np.random.normal(0.65, 0.02)
-                player_hues.append([simulated_hue])
+                # Real color extraction if cv2 is available, otherwise mock
+                hue = self._extract_player_hue(frame, box)
+                player_hues.append([hue])
             else:
                 player_hues.append(None)
                 
-        # Perform simulated DBSCAN clustering on player hues
+        # Perform DBSCAN clustering on player hues
         teams = self.cluster_teams_dbscan(mock_labels, player_hues)
 
         return {
@@ -124,6 +195,34 @@ class DroneDetector:
             "teams": teams
         }
 
+    def _extract_player_hue(self, frame: np.ndarray, box: List[float]) -> float:
+        """
+        Helper to extract median player Hue color channel from a bounding box crop.
+        """
+        xmin, ymin, xmax, ymax = [int(c) for c in box]
+        
+        # Safety crop checks
+        if ymax > ymin and xmax > xmin and ymin >= 0 and xmin >= 0:
+            try:
+                import cv2
+                crop = frame[ymin:ymax, xmin:xmax]
+                if crop.size > 0:
+                    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+                    # Use median Hue (channel 0)
+                    median_h = np.median(hsv[:, :, 0])
+                    # Normalize Hue to [0, 1] range (OpenCV H is [0, 179])
+                    return float(median_h / 179.0)
+            except Exception:
+                pass
+                
+        # Random fallbacks representing two distinct groups (Red shirts around 0.02, Blue around 0.65)
+        # Simply returns a random hue based on a pseudo-random division of positions
+        seed_value = int(xmin + ymin)
+        if seed_value % 2 == 0:
+            return float(np.random.normal(0.05, 0.02))
+        else:
+            return float(np.random.normal(0.65, 0.02))
+
     def cluster_teams_dbscan(self, labels: List[str], player_hues: List[Union[List[float], None]]) -> List[int]:
         """
         Heuristic team clustering using DBSCAN based on player color features.
@@ -131,7 +230,7 @@ class DroneDetector:
         
         Args:
             labels (List[str]): Corresponding labels for each detection.
-            player_hues (List[Union[List[float], None]]): Simulated normalized hue feature list.
+            player_hues (List[Union[List[float], None]]): Normalized hue feature list.
 
         Returns:
             List[int]: Assigned team IDs where:
