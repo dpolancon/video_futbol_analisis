@@ -1,0 +1,41 @@
+# agent_config.yaml
+# -----------------
+# Centralised provider/model configuration for video_futbol_analisis.
+# TogetherClient reads this file automatically when it exists at the repo root.
+#
+# Priority resolution (highest -> lowest):
+#   1. Constructor arguments to TogetherClient(api_key=..., base_url=..., default_model=...)
+#   2. Environment variables / .env file  (OPEN_API_KEY, OPEN_API_BASE)
+#   3. This file
+#   4. Hardcoded fallbacks inside llm_client.py
+
+global_settings:
+  default_provider: "together"
+  default_model: "Qwen/Qwen2.5-7B-Instruct-Turbo"
+
+providers:
+  together:
+    # Name of the env var holding the API key (set in .env as OPEN_API_KEY)
+    api_key_env: "OPEN_API_KEY"
+    # Name of the env var holding the base URL (set in .env as OPEN_API_BASE)
+    base_url_env: "OPEN_API_BASE"
+    base_url: "https://api.together.ai/v1"
+
+# Model catalogue (slugs usable as the `model` argument to TogetherClient.chat())
+# Browse full list at: https://api.together.ai/models
+models:
+  primary:
+    id: "Qwen/Qwen2.5-72B-Instruct-Turbo"
+    description: "Large serverless model — use for tactical analysis, narration, complex queries"
+    max_tokens: 4000
+    temperature: 0.2
+  fast:
+    id: "Qwen/Qwen2.5-7B-Instruct-Turbo"
+    description: "Small/fast serverless model — verified working default for quick tasks"
+    max_tokens: 2000
+    temperature: 0.3
+  vision:
+    id: "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo"
+    description: "Vision-capable serverless model — use when passing image data alongside prompts"
+    max_tokens: 2000
+    temperature: 0.2

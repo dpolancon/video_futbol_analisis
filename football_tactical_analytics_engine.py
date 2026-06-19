@@ -32,8 +32,11 @@ class FootballTacticalAnalyzer:
         occlusion gaps (up to 15 frames / 0.5s) safely before geometric processing.
         """
         interpolated = coords_df.copy()
-        # Interpolate frame-wise (axis=0) for coordinates
-        interpolated = interpolated.interpolate(method='linear', limit=15, limit_direction='both')
+        if len(interpolated) > 0:
+            limit_val = min(15, len(interpolated) - 1)
+            if limit_val > 0:
+                # Interpolate frame-wise (axis=0) for coordinates
+                interpolated = interpolated.interpolate(method='linear', limit=limit_val, limit_direction='both')
         # Fill any remaining NaNs at boundaries with edge values
         interpolated = interpolated.ffill().bfill()
         return interpolated

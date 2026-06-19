@@ -1,0 +1,6 @@
+# LLM / Together.ai dependencies for video_futbol_analisis
+# Install with:  pip install -r requirements_llm.txt
+
+openai>=1.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.0

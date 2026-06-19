@@ -42,3 +42,7 @@ Thumbs.db
 # IDE Profiles
 .vscode/
 .idea/
+
+# Secrets & Credentials — NEVER COMMIT
+.env
+docs/together_AI_baseURL_APIKEY.txt

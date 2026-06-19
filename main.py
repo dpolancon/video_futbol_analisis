@@ -19,7 +19,7 @@ import pandas as pd
 
 # Pipeline imports
 from core.detector import DroneDetector
-from core.tracker import DroneTracker
+from core.tracker import RobustDroneTracker
 from core.homography import PitchRegistrator
 from wrappers.data_layers import TrajectoryDataLayer
 import analytics
@@ -115,7 +115,8 @@ def generate_markdown_report(
     filepath: str, 
     match_id: str, 
     stats: dict, 
-    possession_df: pd.DataFrame
+    possession_df: pd.DataFrame,
+    match_stats: dict = None
 ) -> None:
     """
     Generates a structured, clean Markdown summary report.
@@ -192,6 +193,35 @@ Based on normalized spatial proximity algorithms from Guo et al. (2026):
 ---
 *Report generated programmatically via the Drone Tracking & Analytics Pipeline.*
 """
+    if match_stats:
+        content += f"""
+## 4. Estadísticas Descriptivas (Match Stats)
+
+### Grupo A: Volumen
+* **Total frames procesados**: `{match_stats.get('total_frames_procesados', 0)}`
+* **Duración efectiva**: `{match_stats.get('duracion_efectiva_segundos', 0.0)} s`
+* **Observaciones totales (jugadores)**: `{match_stats.get('observaciones_jugadores_total', 0)}`
+* **Tasa detección de balón**: `{match_stats.get('tasa_deteccion_balon_pct', 0.0)}%`
+* **Promedio jugadores activos/frame**: `{match_stats.get('promedio_jugadores_activos_por_frame', 0.0)}`
+* **Máx jugadores activos/frame**: `{match_stats.get('max_jugadores_activos_frame', 0)}`
+
+### Grupo B: Posesión
+* **Equipo A (Posesión)**: `{match_stats.get('posesion_pct_Equipo_A', 0.0)}%`
+* **Equipo B (Posesión)**: `{match_stats.get('posesion_pct_Equipo_B', 0.0)}%`
+* **No disputada (Balón fuera/Neutro)**: `{match_stats.get('posesion_no_disputada_pct', 0.0)}%`
+* **Racha máx Equipo A**: `{match_stats.get('racha_max_posesion_seg_Equipo_A', 0.0)} s`
+* **Racha máx Equipo B**: `{match_stats.get('racha_max_posesion_seg_Equipo_B', 0.0)} s`
+* **Cambios de posesión (Turnovers)**: `{match_stats.get('cambios_de_posesion', 0)}`
+
+### Grupo C: Distancia y Movimiento
+* **Distancia total Equipo A**: `{match_stats.get('distancia_total_recorrida_m_Equipo_A', 0.0)} m`
+* **Distancia total Equipo B**: `{match_stats.get('distancia_total_recorrida_m_Equipo_B', 0.0)} m`
+* **Media por jugador Equipo A**: `{match_stats.get('distancia_media_por_jugador_m_Equipo_A', 0.0)} m`
+* **Media por jugador Equipo B**: `{match_stats.get('distancia_media_por_jugador_m_Equipo_B', 0.0)} m`
+* **Máxima distancia individual**: `{match_stats.get('distancia_max_jugador_individual_m', 0.0)} m`
+* **Velocidad pico (estimada)**: `{match_stats.get('velocidad_pico_jugador_ms', 0.0)} m/s`
+"""
+
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
     logger.info(f"Markdown report generated: {filepath}")
@@ -200,7 +230,8 @@ def generate_html_dashboard(
     filepath: str, 
     match_id: str, 
     stats: dict, 
-    possession_df: pd.DataFrame
+    possession_df: pd.DataFrame,
+    match_stats: dict = None
 ) -> None:
     """
     Generates a standalone, rich-aesthetic HTML interactive dashboard with Chart.js.
@@ -476,7 +507,7 @@ def process_single_video(video_path: str, args: argparse.Namespace) -> None:
     
     # Initialize components
     detector = DroneDetector(model_weights=args.weights)
-    tracker = DroneTracker(iou_threshold=args.iou_threshold)
+    tracker = RobustDroneTracker(iou_threshold=args.iou_threshold)
     registrator = PitchRegistrator()
     data_layer = TrajectoryDataLayer(registrator=registrator)
     
@@ -576,15 +607,36 @@ def process_single_video(video_path: str, args: argparse.Namespace) -> None:
             frame_idx += args.stride
         total_video_frames = sim_total
 
+    # Post-process trajectory data using offline Re-ID stitching and ball interpolation
+    logger.info("Applying post-processing filters...")
+    raw_trajectory_df = data_layer.to_dataframe()
+    
+    # 1. Stitch fragmented player tracklets globally
+    stitched_df = tracker.offline_stitch(raw_trajectory_df, fps=fps)
+    
+    # 2. Impute ball coordinate gaps
+    trajectory_df = data_layer.filter_ball_trajectory(stitched_df)
+    
     # Serialize trajectory data
     logger.info("Serializing processed trajectory records...")
     csv_out_path = os.path.join(output_dirs["final_dataset"], "trajectories.csv")
     parquet_out_path = os.path.join(output_dirs["final_dataset"], "trajectories.parquet")
     
-    data_layer.save_to_csv(csv_out_path)
-    data_layer.save_to_parquet(parquet_out_path)
+    # Save CSV
+    os.makedirs(os.path.dirname(csv_out_path), exist_ok=True)
+    trajectory_df.to_csv(csv_out_path, index=True)
+    logger.info(f"Trajectory dataset successfully saved as CSV: {csv_out_path}")
     
-    trajectory_df = data_layer.to_dataframe()
+    # Save Parquet
+    try:
+        trajectory_df.to_parquet(parquet_out_path, index=True)
+        logger.info(f"Trajectory dataset successfully saved as Parquet: {parquet_out_path}")
+    except ImportError as e:
+        logger.warning(
+            f"Skipping Parquet serialization: pyarrow or fastparquet is not installed. "
+            f"Details: {e}"
+        )
+        
     logger.info(f"Structured trajectory dataset generated: {trajectory_df.shape[0]} total tracklet points.")
     
     # Downstream Analytics
@@ -594,6 +646,21 @@ def process_single_video(video_path: str, args: argparse.Namespace) -> None:
         possession_analyzer = PossessionClass(t_in=1.5, t_out=2.5)
         
         possession_summary_df = possession_analyzer.calculate_possession(trajectory_df)
+        
+        MatchStatsClass = analytics.get_skill("match_stats")
+        match_stats_analyzer = MatchStatsClass(team0_name="Equipo A", team1_name="Equipo B")
+        match_stats_dict = match_stats_analyzer.calculate(
+            trajectory_df=trajectory_df,
+            possession_df=possession_summary_df,
+            fps=fps,
+            stride=args.stride
+        )
+        
+        # Save JSON match stats
+        stats_json_path = os.path.join(output_dirs["reports"], "match_stats.json")
+        with open(stats_json_path, "w", encoding="utf-8") as f:
+            json.dump(match_stats_dict, f, indent=4)
+        logger.info(f"Match statistics successfully saved to JSON: {stats_json_path}")
         
         # Save CSV possession logs
         possession_csv_path = os.path.join(output_dirs["reports"], "possession_summary.csv")
@@ -614,8 +681,8 @@ def process_single_video(video_path: str, args: argparse.Namespace) -> None:
         md_report_path = os.path.join(output_dirs["reports"], "match_report.md")
         html_report_path = os.path.join(output_dirs["reports"], "dashboard.html")
         
-        generate_markdown_report(md_report_path, match_id, execution_stats, possession_summary_df)
-        generate_html_dashboard(html_report_path, match_id, execution_stats, possession_summary_df)
+        generate_markdown_report(md_report_path, match_id, execution_stats, possession_summary_df, match_stats_dict)
+        generate_html_dashboard(html_report_path, match_id, execution_stats, possession_summary_df, match_stats_dict)
         
         # Output console summary
         team_possessions = possession_summary_df["possession_team_id"].value_counts(normalize=True) * 100
